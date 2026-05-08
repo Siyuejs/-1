@@ -3,64 +3,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import requests
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-# 配置数据集路径
-file_path = 'data/yellow_tripdata_2023-01.parquet'
+# --- 1. 全局配置 ---
+FILE_PATH = 'data/yellow_tripdata_2023-01.parquet'
+# 提示：在此处填入你的 DeepSeek API Key
+API_KEY = "你的_DEEPSEEK_API_KEY"
+API_URL = "https://api.deepseek.com/chat/completions"
 
 
 # ---------------- M1: 数据处理与特征工程 ----------------
 
-def load_and_report(path):
-    print("--- 1. 正在加载数据并生成报告 ---")
+def load_and_clean_data(path):
+    print("--- 1. 正在加载并清洗数据 ---")
     df = pd.read_parquet(path)
-    # 异常值统计逻辑
-    outliers = {
-        "距离为负或零": (df['trip_distance'] <= 0).sum(),
-        "总金额为负或零": (df['total_amount'] <= 0).sum(),
-        "乘客人数为零": (df['passenger_count'] == 0).sum()
-    }
-    print("异常值统计:", outliers)
-    return df
 
+    # 清洗：剔除无效距离、零金额和未知区域 (264, 265)
+    df = df[(df['trip_distance'] > 0) & (df['total_amount'] > 0)]
+    df = df[~df['PULocationID'].isin([264, 265])]
 
-def clean_data(df):
-    df_cleaned = df.copy()
-    df_cleaned = df_cleaned[(df_cleaned['trip_distance'] > 0) & (df_cleaned['total_amount'] > 0)]
-    if df_cleaned['passenger_count'].isnull().any():
-        df_cleaned['passenger_count'] = df_cleaned['passenger_count'].fillna(df_cleaned['passenger_count'].mode()[0])
-    df_cleaned = df_cleaned[~df_cleaned['PULocationID'].isin([264, 265])]
-    print(f"--- 2. 清洗完成。保留记录数: {len(df_cleaned)} ---")
-    return df_cleaned
+    # 填充乘客人数缺失值
+    if df['passenger_count'].isnull().any():
+        df['passenger_count'] = df['passenger_count'].fillna(df['passenger_count'].mode()[0])
 
-
-def feature_engineering(df):
-    print("--- 3. 正在提取特征 ---")
+    # 特征提取
     df['tpep_pickup_datetime'] = pd.to_datetime(df['tpep_pickup_datetime'])
-    df['tpep_dropoff_datetime'] = pd.to_datetime(df['tpep_dropoff_datetime'])
     df['pickup_hour'] = df['tpep_pickup_datetime'].dt.hour
     df['day_of_week'] = df['tpep_pickup_datetime'].dt.dayofweek
-    # 计算行程时长
-    df['duration_min'] = (df['tpep_dropoff_datetime'] - df['tpep_pickup_datetime']).dt.total_seconds() / 60
-    df = df[(df['duration_min'] > 0) & (df['duration_min'] < 180)]
+
+    print(f"✅ 数据处理完成。保留记录数: {len(df)}")
     return df
 
 
 # ---------------- M2: 分析与可视化 ----------------
 
-plt.rcParams['font.sans-serif'] = ['SimHei']
-plt.rcParams['axes.unicode_minus'] = False
-
-
 def run_m2_visualizations(df):
     if not os.path.exists('outputs'): os.makedirs('outputs')
-    print("--- 4. 正在生成可视化图表 ---")
+    print("--- 2. 正在生成可视化图表 ---")
 
-    # 需求趋势
+    plt.rcParams['font.sans-serif'] = ['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    # 1. 24小时需求规律
     plt.figure(figsize=(10, 5))
     df['is_weekend'] = df['day_of_week'].apply(lambda x: '周末' if x >= 5 else '工作日')
     sns.lineplot(data=df, x='pickup_hour', y='fare_amount', hue='is_weekend', estimator=len)
@@ -68,95 +56,111 @@ def run_m2_visualizations(df):
     plt.savefig('outputs/m2_hourly_demand.png')
     plt.close()
 
-    # 区域热度
+    # 2. 热门上车区域
     plt.figure(figsize=(10, 5))
     top_10 = df['PULocationID'].value_counts().head(10)
     sns.barplot(x=top_10.index, y=top_10.values)
     plt.title('Top 10 热门区域')
     plt.savefig('outputs/m2_top_regions.png')
     plt.close()
-    print("✅ M2 可视化图表已保存在 outputs/ 文件夹")
+    print("✅ 可视化图表已保存至 outputs/ 文件夹")
 
 
 # ---------------- M3: 预测模型模块 ----------------
 
 def train_m3_models(df):
-    print("\n--- 5. 正在训练 M3 预测模型 ---")
+    print("\n--- 3. 正在训练神经网络模型 ---")
+    # 数据聚合
     model_df = df.groupby(['pickup_hour', 'day_of_week', 'PULocationID']).size().reset_index(name='demand')
     X = model_df[['pickup_hour', 'day_of_week', 'PULocationID']]
     y = model_df['demand']
 
+    # 划分与标准化
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # 神经网络
+    # 训练 MLP 神经网络 (解决 TensorFlow 环境报错问题)
     nn_model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=100, random_state=42)
     nn_model.fit(X_train_s, y_train)
 
-    # 绘制 Loss 曲线
+    # 绘制 Loss 曲线 (作业硬性要求)
     plt.figure(figsize=(8, 4))
     plt.plot(nn_model.loss_curve_)
     plt.title('神经网络训练 Loss 曲线')
     plt.savefig('outputs/m3_loss_curve.png')
     plt.close()
 
-    print("✅ M3 模型训练完毕并保存 Loss 曲线")
+    print("✅ 预测模型训练完毕并保存 Loss 曲线")
     return nn_model, scaler
 
 
-# ---------------- M4: 命令行问答系统 ----------------
+# ---------------- M4: 智能问答系统 (含 LLM 接入) ----------------
+
+def call_llm_api(query):
+    """DeepSeek API 兜底回复逻辑"""
+    system_prompt = (
+        "你是一个专业的纽约出租车数据分析助手。你已经完成了2023年1月数据的特征工程和神经网络预测。"
+        "1. 如果用户的问题不在硬编码规则内，请基于专业知识给出解释。"
+        "2. 礼貌拒绝无关话题，并引导用户询问'需求预测'、'热门区域'或'费用规律'。"
+    )
+
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ]
+    }
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        response = requests.post(API_URL, json=payload, headers=headers, timeout=10)
+        return response.json()['choices'][0]['message']['content']
+    except:
+        return "🤖 [AI 暂时离线] 我目前只能处理关于数据预测、区域排行和费用的固定查询。"
+
 
 def run_m4_chatbot(df, model, scaler):
-    print("\n" + "=" * 40)
-    print("🚕 欢迎进入纽约出租车智能问答系统！")
-    print("您可以输入：'哪里最热门'、'8点的需求'、'预测需求'、'平均车费'、'退出'")
-    print("=" * 40)
+    print("\n" + "★" * 20 + " 纽约出租车智能问答系统 V5.0 " + "★" * 20)
+    print("支持：1.热门查询 2.时段规律 3.需求预测 4.费用分析 5.AI 智能解释")
 
     while True:
-        query = input("\n👤 请提问: ").strip()
-        if query.lower() in ['退出', 'quit', 'exit']: break
+        query = input("\n👤 请提问 (或输入'quit'退出) > ").strip().lower()
+        if query in ['quit', 'exit', '退出']: break
 
-        # 逻辑判断实现 5 种问题类型
-        if '热门' in query or '区域' in query:
+        # 规则引擎逻辑
+        if any(w in query for w in ['热门', '区域', '哪里']):
             top_zone = df['PULocationID'].value_counts().idxmax()
-            print(f"🤖 系统结论：最热门的区域ID是 {top_zone}。详情见 outputs/m2_top_regions.png")
-
-        elif '时段' in query or '点' in query:
-            print(f"🤖 系统结论：出行规律显示在早晚高峰需求最高。详情见 outputs/m2_hourly_demand.png")
+            print(f"🤖 系统结论：最热门上车区域 ID 为 {top_zone}。相关图表见 outputs/m2_top_regions.png")
 
         elif '预测' in query or '需求' in query:
-            # 默认预测：周一(0), 早上8点, 100号区域
-            test_data = pd.DataFrame([[8, 0, 100]], columns=['pickup_hour', 'day_of_week', 'PULocationID'])
+            test_data = pd.DataFrame([[8, 0, 132]], columns=['pickup_hour', 'day_of_week', 'PULocationID'])
             pred = model.predict(scaler.transform(test_data))[0]
-            print(f"🤖 系统预测：周一早8点 100号区域的需求量预计为 {int(pred)} 单。")
+            print(f"🤖 系统预测：预计该条件下需求量约为 {int(pred)} 单。")
 
-        elif '费' in query or '钱' in query:
+        elif any(w in query for w in ['费', '钱', '贵']):
             avg_fare = df['fare_amount'].mean()
-            print(f"🤖 系统结论：本月平均单程车费为 ${avg_fare:.2f}。")
+            print(f"🤖 数据统计：本月平均每程车费为 ${avg_fare:.2f}。")
 
-        elif '距离' in query or '远' in query:
-            avg_dist = df['trip_distance'].mean()
-            print(f"🤖 系统结论：平均行程距离为 {avg_dist:.2f} 英里。")
-
+        # 大模型兜底
         else:
-            print("🤖 抱歉，我听不太懂，可以换个问法（例如问‘预测需求’）？")
+            print("🤖 正在为您询问 AI 专家...")
+            print(f"🤖 AI 回复：{call_llm_api(query)}")
 
 
-# ---------------- 程序总入口 ----------------
+# ---------------- 程序主入口 ----------------
 
 if __name__ == "__main__":
     # 执行 M1
-    raw_data = load_and_report(file_path)
-    cleaned_data = clean_data(raw_data)
-    final_data = feature_engineering(cleaned_data)
+    data = load_and_clean_data(FILE_PATH)
 
     # 执行 M2
-    run_m2_visualizations(final_data)
+    run_m2_visualizations(data)
 
-    # 执行 M3 (并获取模型供 M4 使用)
-    trained_nn, data_scaler = train_m3_models(final_data)
+    # 执行 M3
+    nn_model, data_scaler = train_m3_models(data)
 
-    # 执行 M4
-    run_m4_chatbot(final_data, trained_nn, data_scaler)
+    # 执行 M4 (交互式问答)
+    run_m4_chatbot(data, nn_model, data_scaler)
